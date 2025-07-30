@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+import argparse
+import sqlite3
+from ipaddress import ip_address
+import subprocess
+import string
+
+# def opendb(path):
+#     con = sqlite3.connect(path)
+#     cur = con.cursor()
+#     return (con, cur)
+
+def name_to_groupid(con, name):
+    return con.execute('SELECT id FROM groups WHERE name = ?', (name, )).fetchone()[0]
+#
+# def groupid_to_name(con, id):
+#     return con.execute('SELECT name FROM groups WHERE id = ?', (id, )).fetchone()[0]
+# def generate_ip_and_increment(con, group_name):
+#     group_ip = con.execute('SELECT current_ip FROM groups WHERE name = ?', (group_name, )).fetchone()[0]
+#     group_ip = int(group_ip)
+#     ++group_ip
+#     con.execute('UPDATE groups SET current_ip = ? WHERE name = ?', (group_ip, group_name))
+#     con.commit()
+#     return group_ip
+
+def template_file(path, data):
+    with open(path) as fd:
+        txt = fd.read()
+        template = string.Template(txt)
+        return template.substitute(data)
+
+parser = argparse.ArgumentParser(description='wireguard helper')
+parser.add_argument('--db', help='filename of the sqlite3 database in which keys and configs are stored (default /etc/wgctl.db)', default='/etc/wgctl.db')
+
+subparsers = parser.add_subparsers(dest='subcommand', required=True, help='Subcommands')
+
+parser_initdb = subparsers.add_parser('initdb', help='Initialize the database')
+def initdb(args):
+    con = sqlite3.connect(args.db)
+    con.executescript('''
+        DROP TABLE IF EXISTS clients;
+        DROP TABLE IF EXISTS groups;
+        CREATE TABLE clients(id INTEGER PRIMARY KEY, name VARCHAR UNIQUE, pubkey VARCHAR UNIQUE, privkey VARCHAR UNIQUE, ip INTEGER UNIQUE, groupid INTEGER);
+        CREATE TABLE groups(id INTEGER PRIMARY KEY, name VARCHAR UNIQUE, current_ip VARCHAR);
+''')
+    con.commit()
+
+# client operations
+parser_client = subparsers.add_parser('client', help='Remote node (client) operations')
+client_subparsers = parser_client.add_subparsers(dest='operation', required=True, help='Client-related commands')
+
+parser_add = client_subparsers.add_parser('create', help='Create a remote node (client)')
+parser_add.add_argument('group', help='Group in which to place the client')
+def client_create(args):
+    con = sqlite3.connect(args.db)
+
+    privkey = subprocess.check_output(['wg', 'genkey']).strip()
+    pubkey = subprocess.check_output(['wg', 'pubkey'], input=privkey).strip()
+    # ip = generate_ip_and_increment(con, args.group)
+
+    group_name = args.group
+    try:
+        con.execute('BEGIN TRANSACTION')
+        group_ip = con.execute('SELECT current_ip FROM groups WHERE name = ?', (group_name, )).fetchone()[0]
+        group_ip = int(group_ip)
+        # print(group_ip)
+        group_ip += 1
+        # print(group_ip)
+        con.execute('UPDATE groups SET current_ip = ? WHERE name = ?', (group_ip, group_name))
+        # con.commit()
+
+        con.execute('INSERT INTO clients(name, pubkey, privkey, ip, groupid) VALUES(?, ?, ?, ?, ?)', (args.client_name, pubkey, privkey, group_ip, name_to_groupid(con, args.group), ))
+        con.commit()
+    except Exception as e:
+        con.rollback()
+        print('got exception during db manip! ROLLBACK ATTEMPTED!')
+        raise
+
+parser_delete = client_subparsers.add_parser('delete', help='Delete a remote node (client)')
+
+parser_getcfg = client_subparsers.add_parser('config', help='Generate the configuration for a remote node (client)')
+parser_getcfg.add_argument('--qr', action=argparse.BooleanOptionalAction, help='Show the config as a QR code')
+parser_getcfg.add_argument('-t', help='Path to template for config, see templates/default', default='templates/default')
+def client_config(args):
+    con = sqlite3.connect(args.db)
+    privkey, ip = con.execute('SELECT privkey, ip FROM clients WHERE name = ?', (args.client_name, )).fetchone()
+    privkey = str(privkey)
+    # pubkey = str(pubkey)
+    ip = str(ip_address(ip))
+
+    cfg = template_file(args.t, locals())
+
+    if not args.qr:
+        print(cfg)
+        return
+    if args.qr:
+        subprocess.run(['qrencode', '-t', 'utf8'], input=cfg.encode('utf-8'))
+        return
+
+for name, subparser in client_subparsers.choices.items():
+    # if subparser.dest == 'list':
+        # continue
+    subparser.add_argument('client_name', help='The name of the remote')
+
+parser_list = client_subparsers.add_parser('list', help='List clients')
+parser_list.add_argument('--show-secrets', action=argparse.BooleanOptionalAction, help='Show secrets like the private key')
+def client_list(args):
+    con = sqlite3.connect(args.db)
+
+    # https://stackoverflow.com/questions/3300464/how-can-i-get-dict-from-sqlite-query
+    def dict_factory(cursor, row):
+        d = {}
+        for idx, col in enumerate(cursor.description):
+            d[col[0]] = row[idx]
+        return d
+    con.row_factory = dict_factory
+
+    res = None
+    if args.show_secrets:
+        res = con.execute('SELECT * FROM clients').fetchall()
+    else:
+        res = con.execute('SELECT id, name, pubkey, ip, groupid FROM clients').fetchall()
+    # print(res)
+
+    column_names = list(res[0].keys())
+    print(' | '.join(column_names))
+
+    for result in res:
+        result['ip'] = str(ip_address(result['ip']))
+        result['pubkey'] = result['pubkey'].decode('utf-8')
+        if 'privkey' in result:
+            result['privkey'] = result['privkey'].decode('utf-8')
+        values = list(result.values())
+        # print(values)
+        print(' | '.join(map(str, values)))
+
+# group operations
+parser_group = subparsers.add_parser('group', help='Client group operations')
+group_subparsers = parser_group.add_subparsers(dest='operation', required=True, help='Group-related commands')
+
+parser_group_add = group_subparsers.add_parser('create', help='Create a group')
+parser_group_add.add_argument('--start-ip', default='192.168.2.0')
+def group_create(args):
+    con = sqlite3.connect(args.db)
+    name = args.group_name
+    initial_ip = int(ip_address(args.start_ip))
+    con.execute('INSERT INTO groups(name, current_ip) VALUES(?, ?)', (name, initial_ip))
+    con.commit()
+
+parser_group_del = group_subparsers.add_parser('delete', help='Delete a group')
+
+parser_group_list = group_subparsers.add_parser('list', help='List groups')
+
+for name, subparser in group_subparsers.choices.items():
+    subparser.add_argument('group_name', help='The name of the group')
+
+
+args = parser.parse_args()
+print(args)
+
+part1 = args.subcommand
+part2 = '_' + args.operation if hasattr(args, 'operation') else ''
+fn_name = f'{part1}{part2}'
+# print(fn_name)
+globals().get(fn_name)(args)
