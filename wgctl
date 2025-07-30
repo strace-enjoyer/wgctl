@@ -154,7 +154,26 @@ parser_group_list = group_subparsers.add_parser('list', help='List groups')
 for name, subparser in group_subparsers.choices.items():
     subparser.add_argument('group_name', help='The name of the group')
 
+# server config generation
+parser_servercfg = subparsers.add_parser('servercfg', help='Generate the server/concentrator/endpoint config')
+parser_servercfg.add_argument('-t', help='Path to template for config (default: templates/default_server)', default='templates/default_server')
+def servercfg(args):
+    con = sqlite3.connect(args.db)
 
+    # the header
+    with open(args.t) as fd:
+        print(fd.read())
+
+    # the peers
+    pairs = con.execute('SELECT pubkey, ip FROM clients').fetchall()
+    for pair in pairs:
+        pubkey, ip = pair
+        pubkey = pubkey.decode('utf-8')
+        peer_txt = f'''[Peer]
+PublicKey = {pubkey}
+AllowedIPs = {str(ip_address(ip))}/32
+'''
+        print(peer_txt)
 args = parser.parse_args()
 print(args)
 
