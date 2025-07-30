@@ -127,9 +127,9 @@ def client_list(args):
 
     for result in res:
         result['ip'] = str(ip_address(result['ip']))
-        result['pubkey'] = result['pubkey'].decode('utf-8')
+        result['pubkey'] = result['pubkey']
         if 'privkey' in result:
-            result['privkey'] = result['privkey'].decode('utf-8')
+            result['privkey'] = result['privkey']
         values = list(result.values())
         # print(values)
         print(' | '.join(map(str, values)))
