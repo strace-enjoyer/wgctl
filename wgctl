@@ -168,7 +168,7 @@ def servercfg(args):
     pairs = con.execute('SELECT pubkey, ip FROM clients').fetchall()
     for pair in pairs:
         pubkey, ip = pair
-        pubkey = pubkey.decode('utf-8')
+        pubkey = pubkey
         peer_txt = f'''[Peer]
 PublicKey = {pubkey}
 AllowedIPs = {str(ip_address(ip))}/32
